@@ -1,0 +1,4 @@
+*.pck
+*.pck.tmp
+sin_traducir.csv
+__pycache__/

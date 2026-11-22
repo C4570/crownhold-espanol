@@ -17,6 +17,8 @@ if not exist "..\Crownhold.exe" (
   pause
   exit /b 1
 )
+echo Cerra el juego antes de continuar.
+pause
 python -m pip install --quiet --disable-pip-version-check zstandard
 python crear_mod_es.py
 if errorlevel 1 (
@@ -26,10 +28,5 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo Ahora en Steam: clic derecho en Crownhold ^> Propiedades ^> General ^> Opciones de lanzamiento
-echo y pega esto:
-echo.
-echo     --main-pack mod_es/Crownhold_ES.pck
-echo.
-echo Despues, en el juego, elegi "Espanol" en Ajustes ^> Idioma.
+echo Listo. Abri el juego y elegi "Espanol" en Ajustes ^> Idioma.
 pause

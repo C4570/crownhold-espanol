@@ -1,22 +1,24 @@
 """
 Crownhold - Mod de traducción al español (comunidad).
 
-Genera Crownhold_ES.pck a partir del Crownhold.exe instalado, sin modificar el juego.
-El español ocupa el lugar del alemán ("Deutsch" pasa a llamarse "Español" en el menú).
+Agrega el español como idioma ADICIONAL de Crownhold (inglés y alemán quedan intactos).
+Mete la traducción y un pequeño script (mod_espanol.gd) dentro de Crownhold.exe,
+guardando antes una copia del original en mod_es/Crownhold.original.exe.
 
 Uso (en la carpeta mod_es):   python crear_mod_es.py
+Desinstalar:                  python crear_mod_es.py --desinstalar
 Requiere:                     pip install zstandard
-Después, en Steam: Crownhold > Propiedades > Opciones de lanzamiento:
-    --main-pack mod_es/Crownhold_ES.pck
 Volvé a correr el script cada vez que el juego se actualice.
 """
-import struct, json, os, sys, hashlib, csv
+import struct, json, os, sys, hashlib, csv, shutil
 import zstandard
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXE = os.path.join(HERE, '..', 'Crownhold.exe')
-OUT = os.path.join(HERE, 'Crownhold_ES.pck')
+BACKUP = os.path.join(HERE, 'Crownhold.original.exe')
 MAP = os.path.join(HERE, 'es_map.json')
+MOD_GD = os.path.join(HERE, 'mod_espanol.gd')
+MOD_RES = 'mod_es/mod_espanol.gd'
 
 # ---------- smaz (descompresión de textos de Godot) ----------
 RCB = [' ', 'the', 'e', 't', 'a', 'of', 'o', 'and', 'i', 'n', 's', 'e ', 'r', ' th', ' t', 'in', 'he', 'th', 'h', 'he ', 'to', '\r\n', 'l', 's ', 'd', ' a', 'an', 'er', 'c', ' o', 'd ', 'on', ' of', 're', 'of ', 't ', ', ', 'is', 'u', 'at', '   ', 'n ', 'or', 'which', 'f', 'm', 'as', 'it', 'that', '\n', 'was', 'en', '  ', ' w', 'es', ' an', ' i', '\r', 'f ', 'g', 'p', 'nd', ' s', 'nd ', 'ed ', 'w', 'ed', 'http://', 'for', 'te', 'ing', 'y ', 'The', ' c', 'ti', 'r ', 'his', 'st', ' in', 'ar', 'nt', ',', ' to', 'y', 'ng', ' h', 'with', 'le', 'al', 'to ', 'b', 'ou', 'be', 'were', ' b', 'se', 'o ', 'ent', 'ha', 'ng ', 'their', '"', 'hi', 'from', ' f', 'in ', 'de', 'ion', 'me', 'v', '.', 've', 'all', 're ', 'ri', 'ro', 'is ', 'co', 'f t', 'are', 'ea', '. ', 'her', ' m', 'er ', ' p', 'es ', 'by', 'they', 'di', 'ra', 'ic', 'not', 's, ', 'd t', 'at ', 'ce', 'la', 'h ', 'ne', 'as ', 'tio', 'on ', 'n t', 'io', 'we', ' a ', 'om', ', a', 's o', 'ur', 'li', 'll', 'ch', 'had', 'this', 'e t', 'g ', 'e\r\n', ' wh', 'ere', ' co', 'e o', 'a ', 'us', ' d', 'ss', '\n\r\n', '\r\n\r', '="', ' be', ' e', 's a', 'ma', 'one', 't t', 'or ', 'but', 'el', 'so', 'l ', 'e s', 's,', 'no', 'ter', ' wa', 'iv', 'ho', 'e a', ' r', 'hat', 's t', 'ns', 'ch ', 'wh', 'tr', 'ut', '/', 'have', 'ly ', 'ta', ' ha', ' on', 'tha', '-', ' l', 'ati', 'en ', 'pe', ' re', 'there', 'ass', 'si', ' fo', 'wa', 'ec', 'our', 'who', 'its', 'z', 'fo', 'rs', '>', 'ot', 'un', '<', 'im', 'th ', 'nc', 'ate', '><', 'ver', 'ad', ' we', 'ly', 'ee', ' n', 'id', ' cl', 'ac', 'il', '</', 'rt', ' wi', 'div', 'e, ', ' it', 'whi', ' ma', 'ge', 'x', 'e c', 'men', '.com']
@@ -105,27 +107,90 @@ def build_tr(d, props, new_texts):
     enc_bt = struct.pack('<II', 32, len(bt)) + struct.pack(f'<{len(bt)}i', *[x if x < 2**31 else x - 2**32 for x in bt])
     pad = (4 - len(blob) % 4) % 4
     enc_s = struct.pack('<II', 31, len(blob)) + bytes(blob) + b'\0'*pad
-    body = d[:va] + enc_bt + d[vb:sa] + enc_s + d[sb:]
-    return b'RSRC' + body
+    return d[:va] + enc_bt + d[vb:sa] + enc_s + d[sb:]
 
-# ---------- Parche de nombres de idioma en scripts compilados ----------
-def patch_gdc(data, repl):
-    assert data[:4] == b'GDSC'
-    ver, size = struct.unpack('<II', data[4:12])
-    raw = zstandard.ZstdDecompressor().decompress(data[12:], max_output_size=size) if size else data[12:]
-    def enc(s):
-        b = s.encode('utf-8'); return struct.pack('<II', 4, len(b)) + b + b'\0'*((4 - len(b) % 4) % 4)
-    for a, b in repl:
-        ea, eb = enc(a), enc(b); assert len(ea) == len(eb)
-        n = raw.count(ea)
-        if n == 0: print('  aviso: no se encontró', a); continue
-        raw = raw.replace(ea, eb)
-    comp = zstandard.ZstdCompressor(level=19).compress(raw) if size else raw
-    return b'GDSC' + struct.pack('<II', ver, len(raw) if size else 0) + comp
+def rscc(body, bs=4096):
+    """Empaqueta un recurso como lo hace Godot al exportar (RSCC + bloques zstd)."""
+    z = zstandard.ZstdCompressor(level=19)
+    blocks = [z.compress(body[i:i+bs]) for i in range(0, len(body), bs)]
+    return (b'RSCC' + struct.pack('<III', 2, bs, len(body)) +
+            struct.pack('<%dI' % len(blocks), *[len(b) for b in blocks]) + b''.join(blocks) + b'RSCC')
+
+def build_es(ded, de, new_texts):
+    body = bytearray(build_tr(ded, de, new_texts))
+    vt, a, b, val = de['locale']
+    assert val == 'de' and body[a+8:a+10] == b'de'
+    body[a+8:a+10] = b'es'                                   # locale "de" -> "es"
+    old = b'res://translation.de.translation'
+    i = body.index(old); body[i:i+len(old)] = b'res://translation.es.translation'
+    r = R(bytes(body)); [r.u32() for _ in range(5)]; r.ustr(); r.u64(); flags = r.u32()
+    if flags & 2:                                            # UID propio, distinto del alemán
+        uid = struct.unpack_from('<Q', body, r.p)[0]
+        struct.pack_into('<Q', body, r.p, (uid ^ 0x5E5E5E5E5E5E) & 0x7FFFFFFFFFFFFFFF)
+    return rscc(bytes(body))
+
+def patch_project(data, autoload_key, autoload_path, tr_path):
+    """Registra el autoload del mod y la traducción nueva en project.binary."""
+    assert data[:4] == b'ECFG'
+    n = struct.unpack_from('<I', data, 4)[0]; p = 8; items = []
+    for _ in range(n):
+        kl = struct.unpack_from('<I', data, p)[0]; k = data[p+4:p+4+kl]; p += 4 + kl
+        vl = struct.unpack_from('<I', data, p)[0]; v = data[p+4:p+4+vl]; p += 4 + vl
+        items.append([k, v])
+    def enc_str(s):
+        b = s.encode() + b'\0'; return struct.pack('<I', len(b)) + b + b'\0' * ((4 - len(b) % 4) % 4)
+    for it in items:
+        if it[0] == b'internationalization/locale/translations':
+            v = it[1]; assert struct.unpack_from('<I', v, 0)[0] == 34
+            cnt = struct.unpack_from('<I', v, 4)[0]; q = 8; lst = []
+            for _ in range(cnt):
+                l = struct.unpack_from('<I', v, q)[0]; lst.append(v[q+4:q+4+l].rstrip(b'\0').decode()); q += 4 + l + (4 - l % 4) % 4
+            if tr_path not in lst: lst.append(tr_path)
+            it[1] = struct.pack('<II', 34, len(lst)) + b''.join(enc_str(x) for x in lst)
+    if not any(k == autoload_key.encode() for k, _ in items):
+        b = autoload_path.encode()
+        items.append([autoload_key.encode(), struct.pack('<II', 4, len(b)) + b + b'\0' * ((4 - len(b) % 4) % 4)])
+    out = b'ECFG' + struct.pack('<I', len(items))
+    for k, v in items:
+        out += struct.pack('<I', len(k)) + k + struct.pack('<I', len(v)) + v
+    return out
+
+def pck_info(path):
+    with open(path, 'rb') as f:
+        start, hdr, base, diro, ents, ver = read_pck(f)
+        E = {x[0]: x for x in ents}
+        if MOD_RES in E: return True
+        return get(f, start, base, E['translation.de.translation'])[:4] == b'RSRC'  # versión vieja del mod
+
+def patch_pe_section(o, start, total):
+    """Actualiza el tamaño de la sección 'pck' del .exe (Windows) para que incluya el paquete nuevo."""
+    o.seek(0); d = o.read(4096)
+    if d[:2] != b'MZ': return
+    pe = struct.unpack_from('<I', d, 0x3c)[0]; nsec = struct.unpack_from('<H', d, pe + 6)[0]
+    so = pe + 24 + struct.unpack_from('<H', d, pe + 20)[0]
+    for i in range(nsec):
+        off = so + 40 * i
+        if d[off:off+8].rstrip(b'\0') == b'pck' and struct.unpack_from('<I', d, off + 20)[0] == start:
+            o.seek(off + 16); o.write(struct.pack('<I', total))
 
 def main():
+    if '--desinstalar' in sys.argv:
+        if os.path.exists(BACKUP) and pck_info(EXE):
+            shutil.copy2(BACKUP, EXE); print('Listo: se restauró el Crownhold.exe original.')
+        else:
+            print('El juego ya está en su versión original (o no hay copia de seguridad).')
+            print('También podés usar en Steam: Propiedades > Archivos instalados > Verificar integridad.')
+        return
+    if pck_info(EXE):
+        if not os.path.exists(BACKUP):
+            sys.exit('El juego ya tiene un mod aplicado pero no hay copia del original. '
+                     'Verificá la integridad de los archivos en Steam y volvé a correr el script.')
+        src = BACKUP; print('El mod ya estaba instalado: se reconstruye a partir de la copia original.')
+    else:
+        print('Guardando copia del juego original en mod_es (Crownhold.original.exe)...')
+        shutil.copy2(EXE, BACKUP); src = BACKUP
     es = json.load(open(MAP, encoding='utf-8'))
-    f = open(EXE, 'rb')
+    f = open(src, 'rb')
     start, hdr, base, diro, ents, ver = read_pck(f)
     print('Crownhold detectado (Godot %d.%d.%d), %d archivos' % (ver + (len(ents),)))
     E = {e[0]: e for e in ents}
@@ -143,30 +208,42 @@ def main():
         with open(os.path.join(HERE, 'sin_traducir.csv'), 'w', newline='', encoding='utf-8') as g:
             w = csv.writer(g); w.writerow(['en', 'es']); [w.writerow([t, '']) for t in dict.fromkeys(falt)]
         print('  Lista en sin_traducir.csv (agregalos a es_map.json y volvé a correr)')
-    rep = {'translation.de.translation': build_tr(ded, de, new)}
-    if 'ui/panels/settings_menu.gdc' in E:
-        rep['ui/panels/settings_menu.gdc'] = patch_gdc(get(f, start, base, E['ui/panels/settings_menu.gdc']),
-            [('Deutsch', 'Español'), ('Englisch', 'Inglés')])
-    if 'scenes/language_intro.gdc' in E:
-        rep['scenes/language_intro.gdc'] = patch_gdc(get(f, start, base, E['scenes/language_intro.gdc']),
-            [('DEUTSCH', 'ESPAÑOL')])
-    tmp = OUT + '.tmp'
-    with open(tmp, 'wb') as o:
-        o.write(b'\0' * base)  # cabecera, se completa al final
-        f.seek(start + base); left = diro - base
-        while left > 0:
+    rep = {
+        'translation.es.translation': build_es(ded, de, new),
+        MOD_RES: open(MOD_GD, 'rb').read(),
+        'project.binary': patch_project(get(f, start, base, E['project.binary']),
+                                        'autoload/ModEspanol', '*res://' + MOD_RES, 'res://translation.es.translation'),
+    }
+    for p in rep:                            # archivos nuevos: se agregan al índice
+        if p not in E:
+            e = [p, 0, 0, b'\0' * 16, 0]; ents.append(e); E[p] = e
+    tmp = EXE + '.tmp'
+    with open(tmp, 'w+b') as o:
+        f.seek(0); left = start
+        while left > 0:                      # programa (todo lo anterior al paquete)
             c = f.read(min(left, 1 << 22)); o.write(c); left -= len(c)
-        for p, data in rep.items():
-            pos = o.tell(); pad = (32 - (pos - base) % 32) % 32; o.write(b'\0' * pad)
-            e = E[p]; e[1] = o.tell() - base; e[2] = len(data); e[3] = hashlib.md5(data).digest(); o.write(data)
-        pos = o.tell(); o.write(b'\0' * ((32 - pos % 32) % 32)); newdir = o.tell()
+        o.write(b'\0' * base)                # cabecera del paquete, se completa al final
+        f.seek(start + base); left = diro - base
+        while left > 0:                      # datos originales del paquete
+            c = f.read(min(left, 1 << 22)); o.write(c); left -= len(c)
+        for p, data in rep.items():          # archivos reemplazados
+            pos = o.tell() - start; o.write(b'\0' * ((32 - (pos - base) % 32) % 32))
+            e = E[p]; e[1] = o.tell() - start - base; e[2] = len(data); e[3] = hashlib.md5(data).digest(); o.write(data)
+        pos = o.tell() - start; o.write(b'\0' * ((32 - pos % 32) % 32)); newdir = o.tell() - start
         o.write(struct.pack('<I', len(ents)))
         for p, off, s, md5, fl in ents:
             pb = p.encode(); pb += b'\0' * ((4 - len(pb) % 4) % 4)
             o.write(struct.pack('<I', len(pb)) + pb + struct.pack('<QQ', off, s) + md5 + struct.pack('<I', fl))
-        struct.pack_into('<Q', hdr, 32, newdir); o.seek(0); o.write(hdr)
-    os.replace(tmp, OUT)
-    print('Listo:', OUT, '(%.1f MB)' % (os.path.getsize(OUT) / 1e6))
+        pck_len = o.tell() - start
+        o.write(struct.pack('<q', pck_len) + b'GDPC')
+        struct.pack_into('<Q', hdr, 32, newdir); o.seek(start); o.write(hdr)
+        patch_pe_section(o, start, pck_len + 12)
+    f.close()
+    try:
+        os.replace(tmp, EXE)
+    except PermissionError:
+        os.remove(tmp); sys.exit('No se pudo reemplazar Crownhold.exe: cerrá el juego y volvé a intentar.')
+    print('Listo: Crownhold.exe ahora incluye el español. Elegí "Español" en Ajustes > Idioma.')
 
 if __name__ == '__main__':
     main()
